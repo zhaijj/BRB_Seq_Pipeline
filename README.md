@@ -1,10 +1,10 @@
 # Poaceae RNA Seq #
 
-This README would document how to run the RNA Seq pipeline for multi-species.
+How to run the BRB-Seq pipeline for multi-species.
 
 ### 0. Requirements ###
 ```
-git clone -b BRB_Seq_Pipeline git@bitbucket.org:bucklerlab/poaceae_chilling_rna_seq.git
+git@github.com:zhaijj/BRB_Seq_Pipeline.git
 ```
 
 * [Trimmomatic](https://github.com/timflutre/trimmomatic)  
