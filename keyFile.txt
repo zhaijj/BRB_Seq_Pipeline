@@ -1,0 +1,3 @@
+Sorghastrum_nutans	Sn-CAM1369-DRAFT-PanAnd-1.0.fasta	Sn-CAM1369-DRAFT-PanAnd-1.0_final.gff3
+Hordeum_vulgare	HvulgareMorex_702_V3.fa	HvulgareMorex_702_V3.gene_exons.gff3
+Zea_mays	Zm-B73-REFERENCE-NAM-5.0.fa	Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.gff3
