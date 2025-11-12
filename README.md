@@ -1,108 +1,211 @@
-# Poaceae RNA Seq #
+# BRB-Seq Pipeline #
 
-How to run the BRB-Seq pipeline for multi-species.
+A comprehensive pipeline for RNA-Seq analysis of 3' RNA-Seq data (BRB-Seq) supporting multi-species analysis.
 
-### 0. Requirements ###
+## Features ##
+
+- **Elegant and maintainable code structure** with modular functions
+- **Robust error handling** with strict mode (`set -euo pipefail`)
+- **Timestamped logging** for better debugging and tracking
+- **Centralized configuration** for easy customization
+- **Consistent code style** with proper quoting and validation
+
+## Requirements ##
+
+### Software Dependencies ###
+* [Trimmomatic](https://github.com/timflutre/trimmomatic) - Read trimming and quality control
+* [STAR](https://github.com/alexdobin/STAR) - RNA-Seq alignment
+* [featureCounts](https://anaconda.org/bioconda/subread) - Read counting
+* [RSeQC](https://rseqc.sourceforge.net) - RNA-Seq quality control
+* [FastQC](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/) - Quality control reports
+* [SAMtools](http://www.htslib.org/) - BAM file manipulation
+* [Bowtie2](http://bowtie-bio.sourceforge.net/bowtie2/index.shtml) - Short read aligner (for rRNA mapping)
+* [GNU Parallel](https://www.gnu.org/software/parallel/) - Parallel processing
+* [AGAT](https://github.com/NBISweden/AGAT) - GFF/GTF file manipulation
+
+### Installation ###
+```bash
+git clone git@github.com:zhaijj/BRB_Seq_Pipeline.git
+cd BRB_Seq_Pipeline
 ```
-git@github.com:zhaijj/BRB_Seq_Pipeline.git
+
+## Usage ##
+
+```bash
+bash BRB_Seq_Pipeline.sh <command>
+
+Commands:
+    index             Generate genome indices
+    QC                Quality control and trimming
+    mapping           Map reads to genome
+    stat              Generate mapping statistics
+    featureCounts     Count features
+    readSaturation    Analyze read saturation
+    gff2bed           Convert GFF3 to BED format
+    map2rRNA          Map reads to rRNA
 ```
 
-* [Trimmomatic](https://github.com/timflutre/trimmomatic)  
-* [STAR](https://github.com/alexdobin/STAR)
-* [featureCounts](https://anaconda.org/bioconda/subread)
-* [RseQC](https://rseqc.sourceforge.net)
 
+## Pipeline Workflow ##
 
 ### 1. Build genome index with STAR ###
 
-Prepare a key file for each species, which contains the species name and the path to the reference genome and annotation file. The example key file is [**here**](keyFile.txt).
+Prepare a key file (`keyFile.txt`) for each species, which contains the species name and the path to the reference genome and annotation file. The example key file is [**here**](keyFile.txt).
 
-```
+**Format:** `species_name <tab> genome.fasta <tab> annotation.gtf`
+
+```bash
 bash BRB_Seq_Pipeline.sh index
 ```
 
-Then the genome index will be built for each species under current directory.
+**Output:** Genome indices will be created in `genomeIndex/<species_name>/` directory.
 
-### 2. Trim reads with Trimmomatic ###
-Before this step, make sure you have the metadata file ready. The example metadata file is [**here**](metadata.txt). The metadata file should be a tab-delimited file with the first column as the species name, recommended no space in the name, e.g., Zea_mays instead of Zea mays. The 2nd column should be plate ID, 3rd column should be plate positions, e.g., A01, A02, etc.
+### 2. Quality control and trimming with Trimmomatic ###
 
-Note:
-- **raw reads are supposed to be under `demultiplexed` directory where the shell is running**
-- **`TruSeq3-SE.fa` is also expected to be under the same directory where the shell is running**
+Before this step, prepare a metadata file (`metadata.txt`). The example metadata file is [**here**](metadata.txt).
 
+**Metadata format:**
+- Column 1: Species name (no spaces, e.g., `Zea_mays`)
+- Column 2: Plate ID
+- Column 3: Plate position (e.g., `A01`, `A02`)
+
+**Prerequisites:**
+- Raw reads must be in the `demultiplexed/` directory
+- Adapter file `TruSeq3-SE.fa` must be in the working directory
+
+```bash
+bash BRB_Seq_Pipeline.sh QC
 ```
-bash BRB_Seq_Pipeline.sh QC # using trimmomatic under /programs/trimmomatic/trimmomatic-0.36.jar
-```
 
-Then the trimmed reads will be generated for each samples under current `01_trimmed_reads` directory.
+**Output:** Trimmed reads and FastQC reports in `01_trimmed_reads/` directory.
 
-### 3. Align reads with STAR ###
+### 3. Map reads with STAR ###
 
-```
+```bash
 bash BRB_Seq_Pipeline.sh mapping
 ```
 
-Then the alignment files will be generated for each samples under current `02_mapping` directory.
+**Output:** Alignment files (sorted BAM) in `02_mapping/` directory.
 
-### 4. Statistics of alignment ###
+**Features:**
+- Two-pass mapping for improved accuracy
+- Sorted BAM output
+- Automatic skipping of EMPTY species entries
 
-```shell
+### 4. Generate mapping statistics ###
+
+```bash
 bash BRB_Seq_Pipeline.sh stat
 ```
 
-Then output will be `summary_statistics.txt`.
+**Output:** `summary_statistics.txt` containing:
+- Raw read counts
+- Clean read counts (post-trimming)
+- Mapped read counts
+- Uniquely mapped read counts
 
-### 5. Count reads with featureCounts ###
+### 5. Count features with featureCounts ###
 
-#### 5.1 Prepare annotation file ####
+#### 5.1 Prepare annotation files ####
+
+Create symbolic links to your annotation files in the `genome_annotation/` directory:
+
 ```bash
-if [ ! -d genome_annotation ]; then
-    mkdir -p genome_annotation
-fi
+mkdir -p genome_annotation
 cd genome_annotation
-cat keyFile.txt | while read line
-do
-    speciesName=$(echo ${line} | awk '{print $1}')
-    gff=$(echo ${line} | awk '{print $3}')
-    ln -sf ${gff} ${speciesName}.gff3
-done
+
+# Create symlinks for each species annotation
+while read line; do
+    species_name=$(echo "${line}" | awk '{print $1}')
+    gff=$(echo "${line}" | awk '{print $3}')
+    ln -sf "${gff}" "${species_name}.gff3"
+done < ../keyFile.txt
+
+cd ..
 ```
 
-#### 5.2 Count reads ####
-```shell
+#### 5.2 Count features ####
+
+```bash
 bash BRB_Seq_Pipeline.sh featureCounts
 ```
 
-Then the read counts will be generated for each samples under current `03_readCounts` directory.
+**Output:** Feature counts and logs in `03_featureCounts/` directory.
 
-### 6. Read saturation analysis ### 
+**Features:**
+- Counts primary alignments only
+- Uses gene-level features with ID attribute
+- Generates detailed log files for each sample
 
-#### 6.1 Prepare BED12 file based on GFF3 ####
+### 6. Read saturation analysis ###
+
+#### 6.1 Install dependencies and convert GFF3 to BED ####
+
 ```bash
-# install agat and RPKM_saturation  first
+# Install AGAT for GFF3 to BED conversion
 conda install -c bioconda agat --experimental-solver=libmamba
-# check if agat is installed successfully
+
+# Verify installation
 agat_convert_sp_gff2bed.pl --help
-# install RSeQC
+
+# Install RSeQC for saturation analysis
 pip3 install RSeQC
-# check if RPKM_saturation.py is installed successfully
-RPKM_saturation.py -h 
-# generate BED12 file
+
+# Verify installation
+RPKM_saturation.py -h
+
+# Convert GFF3 files to BED12 format
 bash BRB_Seq_Pipeline.sh gff2bed
 ```
 
-#### 6.2 Read saturation analysis ####
+**Output:** BED files in `genome_annotation/` directory (one per species).
+
+#### 6.2 Run read saturation analysis ####
+
 ```bash
 bash BRB_Seq_Pipeline.sh readSaturation
 ```
-Then the read saturation analysis will be generated for each samples under current `04_readSaturation` directory. And the example visualization code is [here](readSaturationPlot.R)
 
+**Output:** Saturation analysis results in `04_readSaturation/` directory.
 
-### 7. rRNA percentage check (optional) ###
+**Features:**
+- Uses GNU Parallel for efficient processing of multiple samples
+- Generates RPKM saturation curves
+- Example visualization code available: [readSaturationPlot.R](readSaturationPlot.R)
 
-**Make sure bowtie2 is installed**
+### 7. rRNA mapping (optional quality control) ###
+
+Check the percentage of reads mapping to ribosomal RNA to assess sample quality.
+
 ```bash
 bash BRB_Seq_Pipeline.sh map2rRNA
 ```
 
-Then the rRNA percentage will be recorded in `map2rRNA_percentage.txt` under current directory.
+**Output:** `map2rRNA_percentage.txt` with alignment rates for each sample.
+
+**Features:**
+- Automatically downloads Arabidopsis thaliana ncRNA reference
+- Builds Bowtie2 index (cached for subsequent runs)
+- Maps reads to identify rRNA contamination
+
+## Configuration ##
+
+The pipeline uses centralized configuration at the top of `BRB_Seq_Pipeline.sh`. You can adjust:
+
+- **Thread counts** for different tools (STAR, Trimmomatic, featureCounts, Parallel, Bowtie2)
+- **Directory paths** for input/output locations
+- **Adapter sequences** for trimming
+
+## Troubleshooting ##
+
+- **Error handling:** The pipeline uses strict mode (`set -euo pipefail`) and will exit on errors
+- **Logging:** All operations are timestamped for easy tracking and debugging
+- **Empty species:** Samples marked as "EMPTY" in the metadata file are automatically skipped
+
+## Citation ##
+
+If you use this pipeline, please cite the relevant tools:
+- STAR: Dobin et al. (2013) Bioinformatics
+- Trimmomatic: Bolger et al. (2014) Bioinformatics
+- featureCounts: Liao et al. (2014) Bioinformatics
+- RSeQC: Wang et al. (2012) Bioinformatics
