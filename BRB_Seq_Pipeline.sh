@@ -1,148 +1,400 @@
 #!/bin/bash
+set -euo pipefail
 
+# ============================================================================
+# BRB-Seq Pipeline
+# ============================================================================
 # Author: Jingjing Zhai
 # Date: 2023-10-05
 # Last Modified: 2024-Jan-03
-# Version: 0.3
-# Usage: bash pipeline.sh index|QC|mapping|stat|featureCounts|readSaturation|gff2bed
-# Description: This is a pipeline for RNA-Seq analysis of 3' RNA-Seq data (BRB-Seq)
+# Version: 0.4
+# Description: Pipeline for RNA-Seq analysis of 3' RNA-Seq data (BRB-Seq)
 # Contact: Jingjing Zhai, jz963@cornell.edu, zhaijingjing603@gmail.com
+# ============================================================================
 
-# print the usage if the number of arguments is not equal to 1
-if [ $# -ne 1 ]; then
-    echo "Usage: bash pipeline.sh index|QC|mapping|stat|featureCounts|readSaturation|gff2bed"
-    exit
+# ============================================================================
+# Configuration
+# ============================================================================
+readonly THREADS=32
+readonly THREADS_TRIMMOMATIC=16
+readonly THREADS_FEATURECOUNTS=16
+readonly THREADS_PARALLEL=24
+readonly THREADS_BOWTIE=32
+
+readonly ADAPTER="TruSeq3-SE.fa"
+readonly METADATA_FILE="metadata.txt"
+readonly KEYFILE="keyFile.txt"
+
+readonly DIR_DEMULTIPLEXED="demultiplexed/"
+readonly DIR_TRIMMED="01_trimmed_reads/"
+readonly DIR_MAPPING="02_mapping/"
+readonly DIR_FEATURECOUNTS="03_featureCounts/"
+readonly DIR_SATURATION="04_readSaturation/"
+readonly DIR_GENOME_INDEX="genomeIndex/"
+readonly DIR_GENOME_ANNOTATION="genome_annotation/"
+readonly DIR_RRNA="map2rRNA/"
+readonly DIR_BOWTIE_INDEX="bowtie2_index/"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Print usage information
+usage() {
+    cat << EOF
+Usage: bash $(basename "$0") <command>
+
+Commands:
+    index             Generate genome indices
+    QC                Quality control and trimming
+    mapping           Map reads to genome
+    stat              Generate mapping statistics
+    featureCounts     Count features
+    readSaturation    Analyze read saturation
+    gff2bed           Convert GFF3 to BED format
+    map2rRNA          Map reads to rRNA
+
+EOF
+    exit 1
+}
+
+# Logging function with timestamp
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# Error logging
+log_error() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2
+}
+
+# Create directory if it doesn't exist
+ensure_dir() {
+    local dir="$1"
+    if [[ ! -d "${dir}" ]]; then
+        mkdir -p "${dir}"
+        log "Created directory: ${dir}"
+    fi
+}
+
+# Check if file exists
+check_file() {
+    local file="$1"
+    if [[ ! -f "${file}" ]]; then
+        log_error "Required file not found: ${file}"
+        exit 1
+    fi
+}
+
+# Check if species is empty
+is_empty_species() {
+    local species="$1"
+    [[ "${species}" == "EMPTY" ]]
+}
+
+# ============================================================================
+# Input Validation
+# ============================================================================
+
+if [[ $# -ne 1 ]]; then
+    usage
 fi
 
-if [ "${1}" == "index" ];then
-    # create a directory for genome index if it does not exist
-    if [ ! -d genomeIndex ]; then
-        mkdir -p genomeIndex;
-    fi
-    cat keyFile.txt | while read line
-    do
-        genomeFA=$(echo ${line} | awk '{print $2}')
-        annotation=$(echo ${line} | awk '{print $3}')
-        speciesName=$(echo ${line} | awk '{print $1}')
-        mkdir -p genomeIndex/${speciesName}
-        STAR --runThreadN 32 --runMode genomeGenerate --genomeDir genomeIndex/${speciesName} --genomeFastaFiles ${genomeFA} --sjdbGTFfile ${annotation} --genomeSAindexNbases 13 &
+readonly COMMAND="$1"
+
+# ============================================================================
+# Pipeline Commands
+# ============================================================================
+
+# Generate genome indices
+run_index() {
+    log "Starting genome index generation"
+    check_file "${KEYFILE}"
+    ensure_dir "${DIR_GENOME_INDEX}"
+
+    while read -r line; do
+        local genome_fa=$(echo "${line}" | awk '{print $2}')
+        local annotation=$(echo "${line}" | awk '{print $3}')
+        local species_name=$(echo "${line}" | awk '{print $1}')
+
+        local species_index_dir="${DIR_GENOME_INDEX}${species_name}"
+        ensure_dir "${species_index_dir}"
+
+        log "Generating index for ${species_name}"
+        STAR --runThreadN "${THREADS}" \
+             --runMode genomeGenerate \
+             --genomeDir "${species_index_dir}" \
+             --genomeFastaFiles "${genome_fa}" \
+             --sjdbGTFfile "${annotation}" \
+             --genomeSAindexNbases 13 &
+    done < "${KEYFILE}"
+
+    wait
+    log "Genome index generation completed"
+}
+
+# Quality control and trimming
+run_qc() {
+    log "Starting quality control and trimming"
+    check_file "${METADATA_FILE}"
+    ensure_dir "${DIR_TRIMMED}"
+
+    cut -f3 "${METADATA_FILE}" | sed '1d' | while read -r sample; do
+        log "Processing sample: ${sample}"
+
+        java -jar /programs/trimmomatic/trimmomatic-0.36.jar SE \
+            -threads "${THREADS_TRIMMOMATIC}" \
+            -phred33 \
+            "${DIR_DEMULTIPLEXED}${sample}.fastq.gz" \
+            "${DIR_TRIMMED}${sample}_trimmed.fq" \
+            ILLUMINACLIP:"${ADAPTER}":2:30:10 \
+            LEADING:3 \
+            TRAILING:3 \
+            SLIDINGWINDOW:4:20 \
+            MINLEN:36
+
+        pigz "${DIR_TRIMMED}${sample}_trimmed.fq"
+        fastqc "${DIR_TRIMMED}${sample}_trimmed.fq.gz" -O "${DIR_TRIMMED}"
     done
-elif [ "${1}" == "QC" ];then
-    if [ ! -d 01_trimmed_reads ]; then
-        mkdir -p 01_trimmed_reads;
-    fi
-    outDIR="01_trimmed_reads/"
-    readsDIR="demultiplexed/"
-    adapter="TruSeq3-SE.fa"
-    cut -f3 metadata.txt | sed '1d' | while read line
-    do
-        java -jar /programs/trimmomatic/trimmomatic-0.36.jar SE -threads 16 -phred33 ${readsDIR}${line}.fastq.gz ${outDIR}${line}_trimmed.fq ILLUMINACLIP:${adapter}:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:20 MINLEN:36
-        pigz ${outDIR}${line}_trimmed.fq
-        fastqc ${outDIR}${line}_trimmed.fq.gz -O ${outDIR}
-    done
-elif [ "${1}" == "mapping" ];then
-    if [ ! -d 02_mapping ]; then
-	    mkdir -p 02_mapping;
-    fi
-    outDIR='02_mapping/'
-    inDIR="01_trimmed_reads/"
-    cat metadata.txt | sed '1d' | while read line
-    do
-        speciesName=$(echo ${line} | awk '{print $1}')
-        genomeIndex="genomeIndex/"${speciesName}
-        platePOS=$(echo ${line} | awk '{print $3}')
-        # speciesName is EMPTY, skip this line
-        if [ "${speciesName}" == "EMPTY" ]; then
-            echo "${platePOS} is EMPTY, skip this line"
+
+    log "Quality control completed"
+}
+
+# Map reads to genome
+run_mapping() {
+    log "Starting read mapping"
+    check_file "${METADATA_FILE}"
+    ensure_dir "${DIR_MAPPING}"
+
+    sed '1d' "${METADATA_FILE}" | while read -r line; do
+        local species_name=$(echo "${line}" | awk '{print $1}')
+        local plate_pos=$(echo "${line}" | awk '{print $3}')
+
+        if is_empty_species "${species_name}"; then
+            log "Skipping ${plate_pos} (EMPTY species)"
             continue
-        else
-            STAR --readFilesCommand zcat \
-            --outFileNamePrefix ${outDIR}${platePOS} \
-            --outSAMtype BAM SortedByCoordinate \
-            --outSAMstrandField intronMotif \
-            --genomeDir ${genomeIndex} \
-            --runThreadN 32 \
-            --readFilesIn ${inDIR}${platePOS}_trimmed.fq.gz \
-            --twopassMode Basic \
-            --limitGenomeGenerateRAM 128000000000
         fi
+
+        local genome_index="${DIR_GENOME_INDEX}${species_name}"
+        log "Mapping ${plate_pos} to ${species_name}"
+
+        STAR --readFilesCommand zcat \
+             --outFileNamePrefix "${DIR_MAPPING}${plate_pos}" \
+             --outSAMtype BAM SortedByCoordinate \
+             --outSAMstrandField intronMotif \
+             --genomeDir "${genome_index}" \
+             --runThreadN "${THREADS}" \
+             --readFilesIn "${DIR_TRIMMED}${plate_pos}_trimmed.fq.gz" \
+             --twopassMode Basic \
+             --limitGenomeGenerateRAM 128000000000
     done
-elif [ "${1}" == "stat" ];then
-    echo -e "platePOS\tplateID\trawReads\tcleanReads\tmappedReads\tuniqMappedReads" > summary_statistics.txt
-    cat metadata.txt | sed '1d' | while read line
-    do
-        speciesName=$(echo ${line} | awk '{print $1}')
-        if [ "${speciesName}" == "EMPTY" ]; then
-            echo "${platePOS} is EMPTY, skip this line"
+
+    log "Read mapping completed"
+}
+
+# Generate mapping statistics
+run_stat() {
+    log "Starting statistics generation"
+    check_file "${METADATA_FILE}"
+
+    local output_file="summary_statistics.txt"
+    echo -e "platePOS\tplateID\trawReads\tcleanReads\tmappedReads\tuniqMappedReads" > "${output_file}"
+
+    sed '1d' "${METADATA_FILE}" | while read -r line; do
+        local species_name=$(echo "${line}" | awk '{print $1}')
+        local plate_id=$(echo "${line}" | awk '{print $2}')
+        local plate_pos=$(echo "${line}" | awk '{print $3}')
+
+        if is_empty_species "${species_name}"; then
+            log "Skipping ${plate_pos} (EMPTY species)"
             continue
-        else
-            platePOS=$(echo ${line} | awk '{print $3}')
-            plateID=$(echo ${line} | awk '{print $2}')
-            samtools stats 02_mapping/${platePOS}Aligned.sortedByCoord.out.bam > 02_mapping/${platePOS}Aligned.sortedByCoord.out.bam.stats
-            rawReads=$(( $(zcat demultiplexed/${platePOS}.fastq.gz | wc -l) / 4 ))
-            cleanReads=$(grep 'Number of input reads' 02_mapping/${platePOS}Log.final.out | awk -F '|' '{print $2}')
-            uniqMappedReads=$(grep 'Uniquely mapped reads number' 02_mapping/${platePOS}Log.final.out | awk -F '|' '{print $2}')
-            mappedReads=$(grep 'reads mapped:' 02_mapping/${platePOS}Aligned.sortedByCoord.out.bam.stats | awk -F ':' '{print $2}')
-            echo -e "${platePOS}\t${plateID}\t${rawReads}\t${cleanReads}\t${mappedReads}\t${uniqMappedReads}" >> summary_statistics.txt
         fi
+
+        log "Generating statistics for ${plate_pos}"
+
+        local bam_file="${DIR_MAPPING}${plate_pos}Aligned.sortedByCoord.out.bam"
+        local log_file="${DIR_MAPPING}${plate_pos}Log.final.out"
+        local stats_file="${bam_file}.stats"
+
+        samtools stats "${bam_file}" > "${stats_file}"
+
+        local raw_reads=$(( $(zcat "${DIR_DEMULTIPLEXED}${plate_pos}.fastq.gz" | wc -l) / 4 ))
+        local clean_reads=$(grep 'Number of input reads' "${log_file}" | awk -F '|' '{print $2}')
+        local uniq_mapped=$(grep 'Uniquely mapped reads number' "${log_file}" | awk -F '|' '{print $2}')
+        local mapped_reads=$(grep 'reads mapped:' "${stats_file}" | awk -F ':' '{print $2}')
+
+        echo -e "${plate_pos}\t${plate_id}\t${raw_reads}\t${clean_reads}\t${mapped_reads}\t${uniq_mapped}" >> "${output_file}"
     done
-elif [ "${1}" == "featureCounts" ];then
-    if [ ! -d 03_featureCounts ]; then
-	    mkdir -p 03_featureCounts;
-    fi
-    cat metadata.txt | sed '1d' | while read line
-    do
-        speciesName=$(echo ${line} | awk '{print $1}')
-        platePOS=$(echo ${line} | awk '{print $3}')
-        if [ "${speciesName}" == "EMPTY" ]; then
-            echo "${platePOS} is EMPTY, skip this line"
+
+    log "Statistics generation completed"
+}
+
+# Count features
+run_feature_counts() {
+    log "Starting feature counting"
+    check_file "${METADATA_FILE}"
+    ensure_dir "${DIR_FEATURECOUNTS}"
+
+    sed '1d' "${METADATA_FILE}" | while read -r line; do
+        local species_name=$(echo "${line}" | awk '{print $1}')
+        local plate_pos=$(echo "${line}" | awk '{print $3}')
+
+        if is_empty_species "${species_name}"; then
+            log "Skipping ${plate_pos} (EMPTY species)"
             continue
-        else
-            echo "featureCounts for ${platePOS}"
-            featureCounts \
+        fi
+
+        log "Counting features for ${plate_pos}"
+
+        local annotation="${DIR_GENOME_ANNOTATION}${species_name}.gff3"
+        local bam_file="${DIR_MAPPING}${plate_pos}Aligned.sortedByCoord.out.bam"
+        local output="${DIR_FEATURECOUNTS}${species_name}_${plate_pos}_featureCounts.txt"
+        local log_file="${DIR_FEATURECOUNTS}${species_name}_${plate_pos}_featureCounts.log"
+
+        featureCounts \
             --primary \
-            -T 16 \
+            -T "${THREADS_FEATURECOUNTS}" \
             -t gene \
             -g ID \
-            -a genome_annotation/${speciesName}.gff3 \
-            -o 03_featureCounts/${speciesName}_${platePOS}_featureCounts.txt \
-            02_mapping/${platePOS}Aligned.sortedByCoord.out.bam 2> 03_featureCounts/${speciesName}_${platePOS}_featureCounts.log
+            -a "${annotation}" \
+            -o "${output}" \
+            "${bam_file}" 2> "${log_file}"
+    done
+
+    log "Feature counting completed"
+}
+
+# Analyze read saturation
+run_read_saturation() {
+    log "Starting read saturation analysis"
+    check_file "${METADATA_FILE}"
+    ensure_dir "${DIR_SATURATION}"
+
+    # Define function for parallel execution
+    process_saturation() {
+        local line="$1"
+        local plate_pos=$(echo "${line}" | awk '{print $3}')
+        local species_name=$(echo "${line}" | awk '{print $1}')
+
+        if [[ "${species_name}" == "EMPTY" ]]; then
+            return
         fi
-    done
-elif [ "${1}" == "readSaturation" ];then
-    if [ ! -d 04_readSaturation ]; then
-        mkdir -p 04_readSaturation;
-    fi
-    # define a function for read saturation, the input is the line for metadata
-    function readSaturation(){
-        line=${1}
-        platePOS=$(echo ${line} | awk '{print $3}')
-        speciesName=$(echo ${line} | awk '{print $1}')
-        RPKM_saturation.py -i 02_mapping/${platePOS}Aligned.sortedByCoord.out.bam -r genome_annotation/${speciesName}.bed -o 04_readSaturation/${speciesName}_${platePOS}
+
+        local bam_file="${DIR_MAPPING}${plate_pos}Aligned.sortedByCoord.out.bam"
+        local bed_file="${DIR_GENOME_ANNOTATION}${species_name}.bed"
+        local output="${DIR_SATURATION}${species_name}_${plate_pos}"
+
+        RPKM_saturation.py -i "${bam_file}" -r "${bed_file}" -o "${output}"
     }
-    # export the function and run with parallel
-    export -f readSaturation
-    cat metadata.txt | sed '1d' | parallel -j 24 readSaturation {}
-elif [ "${1}" == "gff2bed" ];then
-    # install agat first
+
+    export -f process_saturation
+    export DIR_MAPPING DIR_GENOME_ANNOTATION DIR_SATURATION
+
+    sed '1d' "${METADATA_FILE}" | parallel -j "${THREADS_PARALLEL}" process_saturation {}
+
+    log "Read saturation analysis completed"
+}
+
+# Convert GFF3 to BED format
+run_gff2bed() {
+    log "Starting GFF3 to BED conversion"
+
+    # Note: Requires agat installation
     # conda install -c bioconda agat --experimental-solver=libmamba
-    # The expression s/\.gff3$/.bed/ is a substitution command that replaces the .gff3 suffix with .bed. The = characters are used to indicate that the expression should be evaluated as a Perl expression.
-    ls genome_annotation/*.gff3 | parallel -j 4 'agat_convert_sp_gff2bed.pl -gff {} -o {= s/\.gff3$/.bed/ =}'
-elif [ "${1}" == "map2rRNA" ];then 
-    if [ ! -d map2rRNA ]; then
-        mkdir -p map2rRNA;
+
+    local gff_files="${DIR_GENOME_ANNOTATION}*.gff3"
+    if ! compgen -G "${gff_files}" > /dev/null; then
+        log_error "No GFF3 files found in ${DIR_GENOME_ANNOTATION}"
+        return 1
     fi
-    wget -O Ath_ncRNA.fa.gz https://ftp.ensemblgenomes.ebi.ac.uk/pub/plants/release-58/fasta/arabidopsis_thaliana/ncrna/Arabidopsis_thaliana.TAIR10.ncrna.fa.gz
-    gunzip Ath_ncRNA.fa.gz
-    # build index for rRNA
-    mkdir -p bowtie2_index
-    bowtie2-build Ath_ncRNA.fa bowtie2_index/rRNA
-    cat metadata.txt | sed '1d' | while read line
-    do
-        platePOS=$(echo ${line} | awk '{print $3}')
-        bowtie2 -p 32 -x bowtie2_index/rRNA -U 01_trimmed_reads/${platePOS}_trimmed.fq.gz -S map2rRNA/${platePOS}.sam 2> map2rRNA/${platePOS}.log
+
+    # Convert .gff3 to .bed using parallel processing
+    ls "${DIR_GENOME_ANNOTATION}"*.gff3 | \
+        parallel -j 4 'agat_convert_sp_gff2bed.pl -gff {} -o {= s/\.gff3$/.bed/ =}'
+
+    log "GFF3 to BED conversion completed"
+}
+
+# Map reads to rRNA
+run_map2rrna() {
+    log "Starting rRNA mapping"
+    check_file "${METADATA_FILE}"
+    ensure_dir "${DIR_RRNA}"
+    ensure_dir "${DIR_BOWTIE_INDEX}"
+
+    local ncrna_file="Ath_ncRNA.fa"
+    local ncrna_gz="${ncrna_file}.gz"
+    local ncrna_url="https://ftp.ensemblgenomes.ebi.ac.uk/pub/plants/release-58/fasta/arabidopsis_thaliana/ncrna/Arabidopsis_thaliana.TAIR10.ncrna.fa.gz"
+
+    # Download ncRNA reference if not exists
+    if [[ ! -f "${ncrna_file}" ]]; then
+        log "Downloading ncRNA reference"
+        wget -O "${ncrna_gz}" "${ncrna_url}"
+        gunzip "${ncrna_gz}"
+    fi
+
+    # Build bowtie2 index for rRNA
+    local index_prefix="${DIR_BOWTIE_INDEX}rRNA"
+    if [[ ! -f "${index_prefix}.1.bt2" ]]; then
+        log "Building bowtie2 index for rRNA"
+        bowtie2-build "${ncrna_file}" "${index_prefix}"
+    fi
+
+    # Map reads to rRNA
+    sed '1d' "${METADATA_FILE}" | while read -r line; do
+        local plate_pos=$(echo "${line}" | awk '{print $3}')
+        log "Mapping ${plate_pos} to rRNA"
+
+        bowtie2 -p "${THREADS_BOWTIE}" \
+                -x "${index_prefix}" \
+                -U "${DIR_TRIMMED}${plate_pos}_trimmed.fq.gz" \
+                -S "${DIR_RRNA}${plate_pos}.sam" \
+                2> "${DIR_RRNA}${plate_pos}.log"
     done
-    grep 'overall alignment rate' map2rRNA/*log | sed -e 's/ overall alignment rate//g' -e 's/map2rRNA\///g' -e 's/.log:/\t/' > map2rRNA_percentage.txt
-else
-    echo "See you later!"
-fi
+
+    # Summarize alignment rates
+    log "Summarizing rRNA alignment rates"
+    grep 'overall alignment rate' "${DIR_RRNA}"*.log | \
+        sed -e 's/ overall alignment rate//g' \
+            -e "s|${DIR_RRNA}||g" \
+            -e 's/.log:/\t/' > map2rRNA_percentage.txt
+
+    log "rRNA mapping completed"
+}
+
+# ============================================================================
+# Main Execution
+# ============================================================================
+
+case "${COMMAND}" in
+    index)
+        run_index
+        ;;
+    QC)
+        run_qc
+        ;;
+    mapping)
+        run_mapping
+        ;;
+    stat)
+        run_stat
+        ;;
+    featureCounts)
+        run_feature_counts
+        ;;
+    readSaturation)
+        run_read_saturation
+        ;;
+    gff2bed)
+        run_gff2bed
+        ;;
+    map2rRNA)
+        run_map2rrna
+        ;;
+    *)
+        log_error "Unknown command: ${COMMAND}"
+        usage
+        ;;
+esac
+
+log "Pipeline step '${COMMAND}' completed successfully"
